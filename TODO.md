@@ -1,0 +1,6 @@
+- [ ] Add date filtering controlled by Calendar selection
+- [ ] Expose a shared selectedDate state via zustand (or URL param) so Calendar filters Documents table
+- [ ] Update Calendar component to set selected date on click
+- [ ] Update Documents page to filter documents by the selected date (matches doc.date)
+- [ ] Add visual indicator + clearing behavior
+- [ ] Run typecheck/build to confirm no errors
