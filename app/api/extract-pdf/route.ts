@@ -21,6 +21,7 @@ async function extractTextWithPdfjs(buffer: Buffer): Promise<string> {
       "build",
       "pdf.worker.js"
     );
+    
 
     const uint8 = new Uint8Array(buffer);
     const pdf = await pdfjsLib.getDocument({ data: uint8, disableStream: true }).promise;
