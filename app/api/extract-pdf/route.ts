@@ -1,47 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ocrPdfBuffer } from "./ocr-utils";
 
 export const runtime = "nodejs";
 
-/**
- * Extract text from PDF using pdfjs-dist directly (text layer, not images)
- * This is a fallback that works when pdf-parse fails
- */
 async function extractTextWithPdfjs(buffer: Buffer): Promise<string> {
   try {
     const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
-    const path = require("path");
-    
-    // Set up the worker
-    pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(
-      process.cwd(),
-      "node_modules",
-      "pdfjs-dist",
-      "legacy",
-      "build",
-      "pdf.worker.js"
-    );
-    
+
+    const isVercel = !!process.env.VERCEL;
+
+    if (isVercel) {
+      // Vercel: disable worker entirely, run in-process
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "";
+    } else {
+      // Local: use the bundled worker file
+      const path = require("path");
+      pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(
+        process.cwd(),
+        "node_modules",
+        "pdfjs-dist",
+        "legacy",
+        "build",
+        "pdf.worker.js",
+      );
+    }
 
     const uint8 = new Uint8Array(buffer);
-    const pdf = await pdfjsLib.getDocument({ data: uint8, disableStream: true }).promise;
-    
+    const loadingTask = pdfjsLib.getDocument({
+      data: uint8,
+      disableStream: true,
+      disableWorker: true, // safe for both environments
+      useSystemFonts: true, // suppresses FoxitSans warnings
+    });
+
+    const pdf = await loadingTask.promise;
     let fullText = "";
-    
+
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      
       const pageText = textContent.items
         .map((item: { str: string }) => item.str)
         .join(" ");
-      
       fullText += pageText + "\n";
     }
-    
+
     return fullText.trim();
   } catch (err) {
-    console.error("[extract-pdf] pdfjs text extraction failed:", (err as Error).message);
+    console.error(
+      "[extract-pdf] pdfjs text extraction failed:",
+      (err as Error).message,
+    );
     return "";
   }
 }
@@ -94,13 +102,11 @@ export async function POST(req: NextRequest) {
     const buffer = Buffer.from(base64, "base64");
     console.log("[extract-pdf] Buffer size:", buffer.length);
 
-    // Step 1: Try multiple text extraction methods
     let extractedText = "";
     let method = "none";
 
-    // Method 1: pdf-parse (instant for text-based PDFs)
+    // Method 1: pdf-parse
     extractedText = await tryPdfParse(buffer);
-
     if (extractedText.length >= 50) {
       console.log(
         "[extract-pdf] pdf-parse succeeded, length:",
@@ -108,51 +114,52 @@ export async function POST(req: NextRequest) {
       );
       method = "pdf-parse";
     } else {
-      // Method 2: pdfjs-dist text extraction (works when pdf-parse fails)
+      // Method 2: pdfjs with disableWorker:true (works local + Vercel)
       console.log(
         "[extract-pdf] pdf-parse got",
         extractedText.length,
-        "chars — trying pdfjs text extraction...",
+        "chars — trying pdfjs...",
       );
       extractedText = await extractTextWithPdfjs(buffer);
-      
+
       if (extractedText.length >= 50) {
         console.log(
-          "[extract-pdf] pdfjs text extraction succeeded, length:",
+          "[extract-pdf] pdfjs succeeded, length:",
           extractedText.length,
         );
         method = "pdfjs-text";
       } else {
-        // Step 3: OCR with tesseract.js (for scanned/image PDFs)
-        console.log(
-          "[extract-pdf] pdfjs got",
-          extractedText.length,
-          "chars — falling back to OCR...",
-        );
+        // Method 3: OCR — only attempt locally (Vercel has no canvas support)
+        const isVercel = !!process.env.VERCEL;
+        if (!isVercel) {
+          console.log("[extract-pdf] trying OCR locally...");
+          try {
+            const { ocrPdfBuffer } = await import("./ocr-utils");
+            const ocrTimeout = new Promise<string>((_, reject) =>
+              setTimeout(() => reject(new Error("OCR timed out")), 20000),
+            );
+            extractedText = await Promise.race([
+              ocrPdfBuffer(buffer),
+              ocrTimeout,
+            ]);
+            console.log("[extract-pdf] OCR length:", extractedText.length);
+            if (extractedText.length >= 20) method = "ocr";
+          } catch (ocrErr) {
+            console.error("[extract-pdf] OCR failed:", ocrErr);
+          }
+        } else {
+          console.log(
+            "[extract-pdf] Vercel: skipping OCR (canvas not supported)",
+          );
+        }
 
-      // Set a timeout for the entire OCR operation
-      const ocrTimeout = new Promise<string>((_, reject) => {
-        setTimeout(() => reject(new Error("OCR operation timed out")), 20000);
-      });
-
-        try {
-          // Race between OCR and timeout
-          extractedText = await Promise.race([
-            ocrPdfBuffer(buffer),
-            ocrTimeout,
-          ]);
-          console.log("[extract-pdf] OCR total length:", extractedText.length);
-          console.log("[extract-pdf] OCR preview:", extractedText.slice(0, 300));
-          if (extractedText.length >= 20) method = "ocr";
-        } catch (ocrErr) {
-          console.error("[extract-pdf] OCR failed:", ocrErr);
-          // Return a successful response with empty text instead of error
-          // This allows the upload to proceed even if OCR fails
+        if (extractedText.length < 20) {
           return NextResponse.json({
             text: "",
             extractedOk: false,
             method: "none",
-            error: (ocrErr as Error).message,
+            error:
+              "Could not extract text from this PDF. It may be image-based.",
           });
         }
       }
@@ -162,7 +169,6 @@ export async function POST(req: NextRequest) {
     console.log(
       `[extract-pdf] Done — method: ${method}, length: ${extractedText.length}`,
     );
-
     return NextResponse.json({ text: extractedText, extractedOk, method });
   } catch (error: any) {
     console.error("[extract-pdf] Unhandled error:", error);
