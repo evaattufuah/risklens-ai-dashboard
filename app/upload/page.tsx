@@ -63,7 +63,6 @@ const pdfjsLib = await import("pdfjs-dist");
 
   const pdf = await pdfjsLib.getDocument({
     data: arrayBuffer,
-    disableWorker: true,
   }).promise;
 
   let fullText = "";
