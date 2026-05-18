@@ -1,5 +1,4 @@
 "use client";
-
 import { useState } from "react";
 import { useDocumentStore } from "@/app/store/useDocumentStore";
 import { useRouter } from "next/navigation";
@@ -48,49 +47,50 @@ export default function UploadPage() {
     const docId = `#DOC-${Date.now().toString(36).toUpperCase()}`;
 
     // Extract text from PDF for AI context (with timeout)
-    let extractedText = "";
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    // Extract text directly in browser using pdfjs
 
-      const extractRes = await fetch("/api/extract-pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileData: dataUrl }),
-        signal: controller.signal,
-      });
 
-      clearTimeout(timeoutId);
+  let extractedText = "";
 
-      if (extractRes.ok) {
-        const extractData = await extractRes.json();
+try {
+const pdfjsLib = await import("pdfjs-dist");
 
-        console.log("EXTRACT API RESPONSE:", extractData);
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
-        extractedText = extractData.text || "";
 
-        const extractedOk = extractData.extractedOk;
+  const arrayBuffer = await file.arrayBuffer();
 
-        console.log("PDF extractedOk:", extractedOk);
-        console.log("Extracted text length:", extractedText.length);
-        console.log("EXTRACTED TEXT:", extractedText);
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer,
+    disableWorker: true,
+  }).promise;
 
-        if (!extractedOk) {
-          extractedText =
-            "[No extractable text found in the uploaded PDF. OCR may be required.]";
-        }
-      } else {
-        console.warn("Extract API returned non-ok status:", extractRes.status);
-        extractedText =
-          "[Document uploaded but text extraction was not successful.]";
-      }
-    } catch (err) {
-      console.error("Failed to extract PDF text:", err);
-      extractedText =
-        "[Document uploaded but text extraction timed out or failed.]";
-    }
+  let fullText = "";
 
-    const newDoc = {
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+
+    const textContent = await page.getTextContent();
+
+    const pageText = textContent.items
+      .map((item: any) => item.str)
+      .join(" ");
+
+    fullText += pageText + "\n";
+  }
+
+  extractedText = fullText.trim();
+
+  console.log("CLIENT PDF TEXT:", extractedText);
+} catch (err) {
+  console.error("Client PDF extraction failed:", err);
+
+  extractedText =
+    "[Document uploaded but text extraction failed.]";
+}
+   
+  const newDoc = {
       id: Date.now().toString(),
       name: file.name,
       fileUrl: dataUrl,
@@ -154,12 +154,15 @@ export default function UploadPage() {
       }, 5000);
     });
 
-    console.log("AI analysis complete, navigating to:", `/documents/${newDoc.id}`);
+    console.log(
+      "AI analysis complete, navigating to:",
+      `/documents/${newDoc.id}`,
+    );
 
     // Stop the spinner and navigate to document page
     setLoading(false);
     router.push(`/documents/${newDoc.id}`);
-  };
+  };;
 
   // Drag & drop handlers (visual only - doesn't change logic)
   const handleDragOver = (e: React.DragEvent) => {
